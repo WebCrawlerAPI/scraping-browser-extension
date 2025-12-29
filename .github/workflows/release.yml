@@ -1,0 +1,32 @@
+name: Release Extension Package
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package extension
+        id: package
+        shell: bash
+        run: |
+          VERSION=$(jq -r '.version' manifest.json)
+          ZIP_NAME="scraping-controller-v${VERSION}.zip"
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+
+          zip -r "$ZIP_NAME" . \
+            -x ".git/*" ".github/*" "dist/*" "*.DS_Store"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.package.outputs.zip_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
