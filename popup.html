@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 320px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      background: #1a1a2e;
+      color: #eee;
+    }
+
+    h1 {
+      font-size: 16px;
+      margin-bottom: 16px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #666;
+    }
+
+    .status-indicator.connected {
+      background: #4ade80;
+      box-shadow: 0 0 8px #4ade80;
+    }
+
+    .status-indicator.connecting {
+      background: #fbbf24;
+      box-shadow: 0 0 8px #fbbf24;
+      animation: pulse 1s infinite;
+    }
+
+    .status-indicator.processing {
+      background: #60a5fa;
+      box-shadow: 0 0 8px #60a5fa;
+      animation: pulse 0.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .connection-status {
+      font-size: 11px;
+      color: #888;
+      margin-left: auto;
+    }
+
+    .section {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 4px;
+      color: #aaa;
+      font-size: 12px;
+    }
+
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #333;
+      border-radius: 6px;
+      background: #16213e;
+      color: #fff;
+      font-size: 14px;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #6366f1;
+    }
+
+    .btn {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #6366f1;
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: #5558e3;
+    }
+
+    .btn-danger {
+      background: #ef4444;
+      color: #fff;
+    }
+
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+
+    .btn-secondary {
+      background: #374151;
+      color: #fff;
+    }
+
+    .btn-secondary:hover {
+      background: #4b5563;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #333;
+    }
+
+    .stat {
+      background: #16213e;
+      padding: 12px;
+      border-radius: 6px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 24px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      color: #888;
+      margin-top: 4px;
+    }
+
+    .last-activity {
+      font-size: 11px;
+      color: #666;
+      text-align: center;
+      margin-top: 8px;
+    }
+
+    .button-group {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .button-group .btn {
+      flex: 1;
+    }
+
+    .reconnect-row {
+      margin-top: 8px;
+    }
+
+    .reconnect-row .btn {
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <h1>
+    <span class="status-indicator" id="statusIndicator"></span>
+    Scraper
+    <span class="connection-status" id="connectionStatus">Disconnected</span>
+  </h1>
+
+  <div class="section">
+    <label>WebSocket Server URL</label>
+    <input type="text" id="serverUrl" placeholder="ws://localhost:3001">
+  </div>
+
+  <div class="section">
+    <label>Page Load Timeout (ms)</label>
+    <input type="number" id="pageLoadTimeout" min="5000" max="120000" step="1000">
+  </div>
+
+  <div class="button-group">
+    <button class="btn btn-primary" id="startBtn">Connect</button>
+    <button class="btn btn-danger" id="stopBtn">Disconnect</button>
+  </div>
+
+  <div class="reconnect-row">
+    <button class="btn btn-secondary" id="reconnectBtn">Reconnect</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-value" id="totalScraped">0</div>
+      <div class="stat-label">Pages Scraped</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="errors">0</div>
+      <div class="stat-label">Errors</div>
+    </div>
+  </div>
+
+  <div class="last-activity" id="lastActivity">No activity yet</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
