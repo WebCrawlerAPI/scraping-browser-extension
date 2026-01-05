@@ -5,7 +5,9 @@ Remote-controlled scraping helper that opens tabs on your machine, captures the 
 ## Features
 - Connects to your server via WebSocket (`ws://localhost:3001/ws` by default).
 - Receives `SCRAPE` commands, opens tabs off-screen, extracts full HTML + title, returns `RESULT`.
+- Captures Shadow DOM content in serialized HTML (limited to the `<main>` element, fallback to body/html).
 - UI popup to start/stop, reconnect, set server URL and page-load timeout, and view live stats.
+- Debug button in popup copies the payload that would be sent to the WebSocket.
 - Auto-reconnect with backoff and basic HTTP status capture via `webRequest`.
 
 ## Install & Load

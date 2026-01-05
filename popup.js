@@ -8,6 +8,8 @@ const connectionStatus = document.getElementById('connectionStatus');
 const totalScrapedEl = document.getElementById('totalScraped');
 const errorsEl = document.getElementById('errors');
 const lastActivityEl = document.getElementById('lastActivity');
+const debugBtn = document.getElementById('debugBtn');
+const debugStatusEl = document.getElementById('debugStatus');
 
 // Load current status
 chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (response) => {
@@ -80,4 +82,39 @@ stopBtn.addEventListener('click', () => {
 
 reconnectBtn.addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: 'RECONNECT' });
+});
+
+const setDebugStatus = (text, isError = false) => {
+  debugStatusEl.textContent = text;
+  debugStatusEl.style.color = isError ? '#f87171' : '#9ca3af';
+};
+
+debugBtn.addEventListener('click', () => {
+  debugBtn.disabled = true;
+  setDebugStatus('Collecting snapshot...');
+
+  chrome.runtime.sendMessage({ type: 'DEBUG_PAYLOAD' }, (response) => {
+    debugBtn.disabled = false;
+
+    if (chrome.runtime.lastError) {
+      setDebugStatus(`Failed: ${chrome.runtime.lastError.message}`, true);
+      return;
+    }
+
+    if (!response?.success || !response.payload) {
+      setDebugStatus(response?.error || 'No payload captured', true);
+      return;
+    }
+
+    const payloadText = JSON.stringify(response.payload, null, 2);
+
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      setDebugStatus('Clipboard API is unavailable', true);
+      return;
+    }
+
+    navigator.clipboard.writeText(payloadText)
+      .then(() => setDebugStatus('Copied payload to clipboard'))
+      .catch((error) => setDebugStatus(`Copy failed: ${error.message}`, true));
+  });
 });

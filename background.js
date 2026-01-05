@@ -67,6 +67,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       sendResponse({ success: true });
       break;
+
+    case 'DEBUG_PAYLOAD':
+      buildDebugPayload()
+        .then((payload) => sendResponse({ success: true, payload }))
+        .catch((error) => sendResponse({ success: false, error: error.message }));
+      break;
   }
   return true;
 });
@@ -276,12 +282,7 @@ async function handleScrapeCommand(message) {
     }
 
     // Extract content
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: extractPageContent,
-    });
-
-    const content = results[0]?.result;
+    const content = await getPageContent(tab.id);
 
     if (!content) {
       throw new Error('Failed to extract page content');
@@ -450,10 +451,115 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function getPageContent(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: extractPageContent,
+  });
+
+  const content = results[0]?.result || null;
+
+  if (content?.visited) {
+    console.log('[Scraper][serialize] visited count:', content.visited.length);
+    console.log('[Scraper][serialize] nodes:', content.visited);
+    delete content.visited;
+  }
+
+  return content;
+}
+
+async function buildDebugPayload() {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+  if (!activeTab?.id) {
+    throw new Error('No active tab available');
+  }
+
+  const content = await getPageContent(activeTab.id);
+
+  if (!content) {
+    throw new Error('Failed to capture page content');
+  }
+
+  return {
+    type: 'RESULT',
+    taskId: 'debug_snapshot',
+    url: activeTab.url,
+    success: true,
+    html: content.html,
+    title: content.title,
+    status_code: 200,
+    timestamp: new Date().toISOString(),
+  };
+}
+
 // Runs in page context
 function extractPageContent() {
+  const voidElements = new Set([
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
+    'param', 'source', 'track', 'wbr', 'basefont', 'bgsound', 'frame', 'keygen',
+  ]);
+
+  const visited = [];
+
+  const escapeText = (text) => text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  const escapeAttribute = (value) => value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;');
+
+  const serializeNode = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return escapeText(node.textContent || '');
+    }
+
+    if (node.nodeType === Node.COMMENT_NODE) {
+      return `<!--${node.nodeValue || ''}-->`;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return '';
+    }
+
+    const tagName = node.tagName.toLowerCase();
+    const debugLabel = [tagName, node.id ? `#${node.id}` : '', node.className ? `.${String(node.className).trim().replace(/\s+/g, '.')}` : '']
+      .join('')
+      .replace(/\.+$/, '');
+    visited.push(debugLabel || tagName);
+    const attributes = Array.from(node.attributes)
+      .map((attr) => `${attr.name}="${escapeAttribute(attr.value)}"`)
+      .join(' ');
+
+    let html = `<${tagName}${attributes ? ' ' + attributes : ''}>`;
+
+    if (!voidElements.has(tagName)) {
+      node.childNodes.forEach((child) => {
+        html += serializeNode(child);
+      });
+
+      if (node.shadowRoot) {
+        html += `<template shadowroot="${node.shadowRoot.mode}">`;
+        node.shadowRoot.childNodes.forEach((child) => {
+          html += serializeNode(child);
+        });
+        html += '</template>';
+      }
+
+      html += `</${tagName}>`;
+    }
+
+    return html;
+  };
+
+  const root = document.querySelector('main') || document.body || document.documentElement;
+
   return {
-    html: document.documentElement.outerHTML,
+    html: serializeNode(root),
     title: document.title,
+    visited,
   };
 }

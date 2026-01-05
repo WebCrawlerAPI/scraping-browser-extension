@@ -183,6 +183,21 @@
     .reconnect-row .btn {
       width: 100%;
     }
+
+    .debug-section {
+      margin-top: 12px;
+    }
+
+    .debug-section .btn {
+      width: 100%;
+    }
+
+    .debug-status {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #9ca3af;
+      min-height: 16px;
+    }
   </style>
 </head>
 <body>
@@ -209,6 +224,11 @@
 
   <div class="reconnect-row">
     <button class="btn btn-secondary" id="reconnectBtn">Reconnect</button>
+  </div>
+
+  <div class="section debug-section">
+    <button class="btn btn-secondary" id="debugBtn">Copy debug payload</button>
+    <div class="debug-status" id="debugStatus"></div>
   </div>
 
   <div class="stats">
