@@ -1,164 +1,260 @@
 # Browser Extension - Scraping Controller
 
-Chrome extension for remote-controlled web scraping via WebSocket.
+Chrome extension for remote-controlled web scraping via HTTP API.
 
 ## Architecture
 
+Chrome's Manifest V3 terminates extension background scripts after ~30 seconds of inactivity. To maintain persistent connections, a Native Messaging Host runs as a separate process with an HTTP server.
+
 ```
-┌─────────────────┐         WebSocket         ┌─────────────────┐
-│   Your Server   │◄────────────────────────►│    Extension    │
-│                 │                           │                 │
-│  Send SCRAPE    │─────────────────────────►│  Opens tab      │
-│  commands       │                           │  Extracts HTML  │
-│                 │◄─────────────────────────│  Returns RESULT │
-└─────────────────┘                           └─────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                  CHROME                                      │
+│  ┌─────────────────┐                                                        │
+│  │    Extension    │                                                        │
+│  │   (popup.js +   │    Chrome Native                                       │
+│  │  background.js) │    Messaging API                                       │
+│  └────────┬────────┘       (stdio)                                          │
+│           │                                                                 │
+└───────────┼─────────────────────────────────────────────────────────────────┘
+            │
+            ▼
+┌───────────────────────┐         ┌─────────────────────────┐
+│     Native Host       │         │     HTTP Clients        │
+│      (Node.js)        │◄────────│  (curl, your server,    │
+│                       │  HTTP   │   API consumers, etc.)  │
+│  - Runs as separate   │  POST   │                         │
+│    process            │ /scrape └─────────────────────────┘
+│  - Hono HTTP server   │
+│  - Port 3002 default  │
+└───────────────────────┘
 ```
+
+**Data Flow:**
+1. HTTP client sends POST /scrape → Native Host
+2. Native Host forwards SCRAPE command → Extension (via stdio)
+3. Extension opens tab, captures content
+4. Extension sends RESULT → Native Host (via stdio)
+5. Native Host returns HTTP response → Client
+
+## Installation
+
+### 1. Load Extension
+
+1. Go to `chrome://extensions/`
+2. Enable **Developer mode** (top right toggle)
+3. Click **Load unpacked**
+4. Select the `browser-extension` directory
+
+### 2. Get Extension ID
+
+After loading, copy the **ID** shown under "Scraping Controller" (32-character string like `cigpoehhihgofakjfekijajiafildcap`)
+
+### 3. Install Native Host
+
+```bash
+cd native-host
+pnpm install
+./install.sh YOUR_EXTENSION_ID
+```
+
+### 4. Reload & Connect
+
+1. Go to `chrome://extensions/`
+2. Click the **refresh icon** on "Scraping Controller"
+3. Click extension icon in toolbar
+4. Click **Connect**
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `manifest.json` | Chrome extension manifest (v3) |
-| `background.js` | Service worker - WebSocket connection, tab management, scraping |
+| `background.js` | Service worker - communicates with native host, manages tabs |
 | `popup.html` | Extension popup UI |
 | `popup.js` | Popup logic and state management |
+| `native-host/` | Native messaging host (Node.js + Hono HTTP server) |
 
-## WebSocket Protocol
+## HTTP API
 
-### Server → Extension
+### POST /scrape
 
-**SCRAPE command:**
-```json
-{
-  "type": "SCRAPE",
-  "taskId": "unique-task-id",
-  "url": "https://example.com",
-  "options": {
-    "waitFor": 2000,
-    "timeout": 30000
-  }
-}
+Scrape a URL and return the HTML content.
+
+**Request:**
+```bash
+curl -X POST http://localhost:3002/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
 ```
 
-**PING (keepalive):**
-```json
-{
-  "type": "PING"
-}
+**Request with options:**
+```bash
+curl -X POST http://localhost:3002/scrape \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "options": {
+      "waitFor": 2000,
+      "timeout": 30000
+    }
+  }'
 ```
 
-### Extension → Server
-
-**RESULT (success):**
+**Response (success):**
 ```json
 {
-  "type": "RESULT",
-  "taskId": "unique-task-id",
-  "url": "https://example.com",
-  "success": true,
   "html": "<!DOCTYPE html>...",
-  "title": "Page Title",
   "status_code": 200,
-  "timestamp": "2025-01-01T12:00:00.000Z"
+  "content_size": 12345,
+  "final_url": "https://example.com/after-redirect"
 }
 ```
 
-**RESULT (error):**
+**Response (error):**
 ```json
 {
-  "type": "RESULT",
-  "taskId": "unique-task-id",
-  "url": "https://example.com",
-  "success": false,
   "error": "Page load timeout",
   "status_code": 0,
-  "timestamp": "2025-01-01T12:00:00.000Z"
+  "content_size": 0,
+  "final_url": "https://example.com"
 }
 ```
 
-**STATUS:**
-```json
-{
-  "type": "STATUS",
-  "status": "ready|processing",
-  "taskId": "task-id-if-processing",
-  "timestamp": "2025-01-01T12:00:00.000Z"
-}
+### GET /health
+
+Check if the native host is running.
+
+**Request:**
+```bash
+curl http://localhost:3002/health
 ```
 
-**PONG:**
+**Response:**
 ```json
 {
-  "type": "PONG",
+  "status": "ok",
+  "pending": 0,
   "timestamp": "2025-01-01T12:00:00.000Z"
 }
 ```
 
 ## Configuration
 
-Stored in `chrome.storage.local` under key `scraperConfig`:
+### Native Host
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `serverUrl` | `ws://localhost:3001` | WebSocket server URL |
+| `SCRAPER_PORT` | `3002` | HTTP server port (environment variable) |
+
+### Extension (chrome.storage.local)
+
+Stored under key `scraperConfig`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
 | `enabled` | `false` | Whether connection is active |
 | `pageLoadTimeout` | `30000` | Max time to wait for page load (ms) |
 | `reconnectInterval` | `3000` | Base delay between reconnect attempts (ms) |
-| `maxReconnectAttempts` | `10` | Max reconnection attempts before stopping |
 
-## Reconnection Logic
+## Debugging
 
-- On disconnect, schedules reconnect with exponential backoff
-- Delay: `min(reconnectInterval * attempts, 30000)` ms
-- Resets attempt counter on successful connection
-- Stops after `maxReconnectAttempts` failures
-
-## Development
-
-### Load Extension
+**Extension logs:**
 1. Go to `chrome://extensions/`
-2. Enable "Developer mode"
-3. Click "Load unpacked"
-4. Select this directory
+2. Click "Inspect views: service worker"
+3. Check Console tab
 
-### Debug
-- Background script logs: `chrome://extensions/` → Extension → "Inspect views: service worker"
-- Console shows: `[Scraper] Connected`, `[Scraper] Received: SCRAPE task_1`, etc.
+**Native host logs:**
+```bash
+tail -f /tmp/scraper-native-host.log
+```
 
-## Server Implementation Notes
+**Test the API:**
+```bash
+# Health check
+curl http://localhost:3002/health
 
-Your server should:
+# Scrape a page
+curl -X POST http://localhost:3002/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+```
 
-1. Accept WebSocket connections
-2. Send `SCRAPE` commands when URLs need scraping
-3. Handle `RESULT` messages with scraped HTML
-4. Optionally send `PING` for keepalive (extension responds with `PONG`)
-5. Track `STATUS` messages to know when extension is ready
+## Uninstall Native Host
 
-Example minimal server (Node.js):
+```bash
+cd native-host
+./uninstall.sh
+```
+
+## Usage Examples
+
+### Basic scraping with curl
+
+```bash
+# Simple scrape
+curl -X POST http://localhost:3002/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+
+# With wait time for JavaScript-heavy pages
+curl -X POST http://localhost:3002/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://spa-app.com", "options": {"waitFor": 3000}}'
+```
+
+### Node.js client example
+
 ```javascript
-import { WebSocketServer } from 'ws';
-
-const wss = new WebSocketServer({ port: 3001 });
-
-wss.on('connection', (ws) => {
-  console.log('Extension connected');
-
-  ws.on('message', (data) => {
-    const msg = JSON.parse(data);
-
-    if (msg.type === 'RESULT') {
-      console.log('Got HTML:', msg.html?.length, 'chars');
-    }
-
-    if (msg.type === 'STATUS' && msg.status === 'ready') {
-      // Extension is ready, can send SCRAPE command
-      ws.send(JSON.stringify({
-        type: 'SCRAPE',
-        taskId: 'task_1',
-        url: 'https://example.com'
-      }));
-    }
+async function scrape(url, options = {}) {
+  const response = await fetch('http://localhost:3002/scrape', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, options }),
   });
-});
+
+  const result = await response.json();
+
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  return result;
+}
+
+// Usage
+const result = await scrape('https://example.com');
+console.log('HTML length:', result.html.length);
+console.log('Final URL:', result.final_url);
+console.log('Status:', result.status_code);
+```
+
+### Python client example
+
+```python
+import requests
+
+def scrape(url, wait_for=None, timeout=None):
+    options = {}
+    if wait_for:
+        options['waitFor'] = wait_for
+    if timeout:
+        options['timeout'] = timeout
+
+    response = requests.post(
+        'http://localhost:3002/scrape',
+        json={'url': url, 'options': options}
+    )
+
+    result = response.json()
+
+    if 'error' in result:
+        raise Exception(result['error'])
+
+    return result
+
+# Usage
+result = scrape('https://example.com')
+print(f"HTML length: {len(result['html'])}")
+print(f"Final URL: {result['final_url']}")
+print(f"Status: {result['status_code']}")
 ```

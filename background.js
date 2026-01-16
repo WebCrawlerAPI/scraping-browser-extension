@@ -1,33 +1,109 @@
-// WebSocket Scraping Controller - Background Service Worker
+// HTTP Scraping Controller - Background Service Worker
+// Uses Native Messaging Host with HTTP server for receiving scrape requests
+
+console.log('[Scraper] Service worker starting at', new Date().toISOString());
+
+// Icon colors for different states
+const STATUS_COLORS = {
+  disconnected: '#ef4444', // red
+  connecting: '#fbbf24',   // yellow/amber
+  connected: '#4ade80',    // green
+};
+
+// Draw robot icon with status indicator
+function updateIcon(status) {
+  const size = 32;
+  const canvas = new OffscreenCanvas(size, size);
+  const ctx = canvas.getContext('2d');
+
+  // Clear
+  ctx.clearRect(0, 0, size, size);
+
+  // Robot head (rounded rectangle)
+  ctx.fillStyle = '#6366f1';
+  ctx.beginPath();
+  ctx.roundRect(4, 6, 24, 20, 4);
+  ctx.fill();
+
+  // Antenna
+  ctx.strokeStyle = '#6366f1';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(16, 6);
+  ctx.lineTo(16, 2);
+  ctx.stroke();
+  ctx.fillStyle = '#6366f1';
+  ctx.beginPath();
+  ctx.arc(16, 2, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(11, 14, 3, 0, Math.PI * 2);
+  ctx.arc(21, 14, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pupils
+  ctx.fillStyle = '#1e1b4b';
+  ctx.beginPath();
+  ctx.arc(11, 14, 1.5, 0, Math.PI * 2);
+  ctx.arc(21, 14, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth
+  ctx.fillStyle = '#1e1b4b';
+  ctx.fillRect(10, 20, 12, 2);
+
+  // Status indicator dot (bottom right)
+  const dotColor = STATUS_COLORS[status] || STATUS_COLORS.disconnected;
+  ctx.fillStyle = dotColor;
+  ctx.beginPath();
+  ctx.arc(26, 26, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Dot border
+  ctx.strokeStyle = '#1a1a2e';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(26, 26, 5, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Set the icon
+  const imageData = ctx.getImageData(0, 0, size, size);
+  chrome.action.setIcon({ imageData: { 32: imageData } });
+}
+
+const NATIVE_HOST_NAME = 'com.webcrawlerapi.scraper';
 
 let config = {
-  serverUrl: 'ws://localhost:3001/ws',
   enabled: false,
   pageLoadTimeout: 30000,
   reconnectInterval: 3000,
-  maxReconnectAttempts: 10,
 };
 
-let ws = null;
-let reconnectAttempts = 0;
-let reconnectTimer = null;
+let nativePort = null;
 let isProcessing = false;
 
 let stats = {
   totalScraped: 0,
   errors: 0,
   lastActivity: null,
-  connectionState: 'disconnected', // disconnected, connecting, connected
+  connectionState: 'disconnected',
 };
+
+// Set initial icon
+updateIcon('disconnected');
 
 // Load config from storage on startup
 chrome.storage.local.get(['scraperConfig'], (result) => {
   if (result.scraperConfig) {
     config = { ...config, ...result.scraperConfig };
     if (config.enabled) {
-      connect();
+      connectToNativeHost();
     }
   }
+  updateIcon(stats.connectionState);
   broadcastStatus();
 });
 
@@ -48,22 +124,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'START':
       config.enabled = true;
       chrome.storage.local.set({ scraperConfig: config });
-      connect();
+      connectToNativeHost();
       sendResponse({ success: true });
       break;
 
     case 'STOP':
       config.enabled = false;
       chrome.storage.local.set({ scraperConfig: config });
-      disconnect();
+      disconnectFromNativeHost();
       sendResponse({ success: true });
       break;
 
     case 'RECONNECT':
       if (config.enabled) {
-        disconnect();
-        reconnectAttempts = 0;
-        connect();
+        disconnectFromNativeHost();
+        setTimeout(() => connectToNativeHost(), 100);
       }
       sendResponse({ success: true });
       break;
@@ -78,6 +153,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 function broadcastStatus() {
+  updateIcon(stats.connectionState);
   chrome.runtime.sendMessage({
     type: 'STATUS_UPDATE',
     config,
@@ -88,130 +164,78 @@ function broadcastStatus() {
   });
 }
 
-function updateConnectionState(state) {
-  stats.connectionState = state;
-  broadcastStatus();
-}
-
-function connect() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+function connectToNativeHost() {
+  if (nativePort) {
+    console.log('[Scraper] Already connected to native host');
     return;
   }
 
-  updateConnectionState('connecting');
-  console.log('[Scraper] Connecting to', config.serverUrl);
+  console.log('[Scraper] Connecting to native host:', NATIVE_HOST_NAME);
+  stats.connectionState = 'connecting';
+  broadcastStatus();
 
   try {
-    ws = new WebSocket(config.serverUrl);
+    nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
 
-    ws.onopen = () => {
-      console.log('[Scraper] Connected');
-      reconnectAttempts = 0;
-      updateConnectionState('connected');
+    nativePort.onMessage.addListener((message) => {
+      console.log('[Scraper] From native host:', message.type);
+      handleNativeMessage(message);
+    });
 
-      // Send ready status
-      send({
-        type: 'STATUS',
-        status: 'ready',
-        timestamp: new Date().toISOString(),
-      });
-    };
+    nativePort.onDisconnect.addListener(() => {
+      const error = chrome.runtime.lastError;
+      console.log('[Scraper] Native host disconnected:', error?.message || 'unknown');
+      nativePort = null;
+      stats.connectionState = 'disconnected';
+      broadcastStatus();
 
-    ws.onmessage = async (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        await handleMessage(message);
-      } catch (error) {
-        console.error('[Scraper] Failed to parse message:', error);
-      }
-    };
-
-    ws.onclose = (event) => {
-      console.log('[Scraper] Connection closed:', event.code, event.reason);
-      ws = null;
-      updateConnectionState('disconnected');
-
+      // Try to reconnect if still enabled
       if (config.enabled) {
-        scheduleReconnect();
+        setTimeout(() => connectToNativeHost(), config.reconnectInterval);
       }
-    };
+    });
 
-    ws.onerror = (error) => {
-      console.error('[Scraper] WebSocket error:', error);
-    };
+    // Native host starts HTTP server automatically on connection
+    stats.connectionState = 'connected';
+    broadcastStatus();
 
   } catch (error) {
-    console.error('[Scraper] Failed to create WebSocket:', error);
-    updateConnectionState('disconnected');
-    if (config.enabled) {
-      scheduleReconnect();
-    }
-  }
-}
-
-function disconnect() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  if (ws) {
-    ws.close(1000, 'User disconnected');
-    ws = null;
-  }
-
-  updateConnectionState('disconnected');
-  console.log('[Scraper] Disconnected');
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer) {
-    return;
-  }
-
-  if (reconnectAttempts >= config.maxReconnectAttempts) {
-    console.log('[Scraper] Max reconnect attempts reached');
-    config.enabled = false;
-    chrome.storage.local.set({ scraperConfig: config });
+    console.error('[Scraper] Failed to connect to native host:', error);
+    stats.connectionState = 'disconnected';
     broadcastStatus();
-    return;
   }
-
-  reconnectAttempts++;
-  const delay = Math.min(config.reconnectInterval * reconnectAttempts, 30000);
-
-  console.log(`[Scraper] Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${config.maxReconnectAttempts})`);
-
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    if (config.enabled) {
-      connect();
-    }
-  }, delay);
 }
 
-function send(data) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
+function disconnectFromNativeHost() {
+  if (nativePort) {
+    nativePort.disconnect();
+    nativePort = null;
+  }
+  stats.connectionState = 'disconnected';
+  broadcastStatus();
+  console.log('[Scraper] Disconnected from native host');
+}
+
+function sendToNativeHost(data) {
+  if (nativePort) {
+    nativePort.postMessage(data);
     return true;
   }
   return false;
 }
 
-async function handleMessage(message) {
-  console.log('[Scraper] Received:', message.type, message.taskId || '');
-
+function handleNativeMessage(message) {
+  // Native host now sends SCRAPE commands directly (no wrapper)
   switch (message.type) {
     case 'SCRAPE':
-      await handleScrapeCommand(message);
+      handleScrapeCommand(message);
       break;
 
     case 'PING':
-      send({ type: 'PONG', timestamp: new Date().toISOString() });
+      sendToNativeHost({ type: 'PONG', timestamp: new Date().toISOString() });
       break;
 
     case 'CANCEL':
-      // Could implement task cancellation here
       console.log('[Scraper] Cancel requested');
       break;
 
@@ -224,24 +248,26 @@ async function handleScrapeCommand(message) {
   const { taskId, url, options = {} } = message;
 
   if (!url) {
-    send({
+    sendToNativeHost({
       type: 'RESULT',
       taskId,
       success: false,
       error: 'URL is required',
       status_code: 0,
+      final_url: url,
       timestamp: new Date().toISOString(),
     });
     return;
   }
 
   if (isProcessing) {
-    send({
+    sendToNativeHost({
       type: 'RESULT',
       taskId,
       success: false,
       error: 'Already processing another task',
       status_code: 0,
+      final_url: url,
       timestamp: new Date().toISOString(),
     });
     return;
@@ -250,8 +276,8 @@ async function handleScrapeCommand(message) {
   isProcessing = true;
   broadcastStatus();
 
-  // Notify server we're starting
-  send({
+  // Notify native host we're starting
+  sendToNativeHost({
     type: 'STATUS',
     status: 'processing',
     taskId,
@@ -259,7 +285,8 @@ async function handleScrapeCommand(message) {
   });
 
   let tab = null;
-  let statusCode = 200; // Default to 200 for successful page loads
+  let statusCode = 200;
+  let finalUrl = url;
 
   try {
     // Create new tab
@@ -268,7 +295,7 @@ async function handleScrapeCommand(message) {
       active: false,
     });
 
-    // Wait for page to load and capture status code via webRequest if available
+    // Wait for page to load
     const timeout = options.timeout || config.pageLoadTimeout;
     const loadResult = await waitForTabLoadWithStatus(tab.id, url, timeout);
     statusCode = loadResult.statusCode || 200;
@@ -277,9 +304,12 @@ async function handleScrapeCommand(message) {
     if (options.waitFor) {
       await sleep(options.waitFor);
     } else {
-      // Default small delay for JS execution
       await sleep(1000);
     }
+
+    // Get final URL after any redirects
+    const tabInfo = await chrome.tabs.get(tab.id);
+    finalUrl = tabInfo.url || url;
 
     // Extract content
     const content = await getPageContent(tab.id);
@@ -288,11 +318,12 @@ async function handleScrapeCommand(message) {
       throw new Error('Failed to extract page content');
     }
 
-    // Send result immediately
-    send({
+    // Send result
+    sendToNativeHost({
       type: 'RESULT',
       taskId,
       url,
+      final_url: finalUrl,
       success: true,
       html: content.html,
       title: content.title,
@@ -302,17 +333,16 @@ async function handleScrapeCommand(message) {
 
     stats.totalScraped++;
     stats.lastActivity = new Date().toISOString();
-    console.log('[Scraper] Task completed:', taskId, 'status:', statusCode);
+    console.log('[Scraper] Task completed:', taskId, 'status:', statusCode, 'final_url:', finalUrl);
 
   } catch (error) {
     console.error('[Scraper] Task error:', error.message);
     stats.errors++;
     stats.lastActivity = new Date().toISOString();
 
-    // Try to determine status code from error message
     let errorStatusCode = 0;
     if (error.message.includes('net::ERR_')) {
-      errorStatusCode = 0; // Network error
+      errorStatusCode = 0;
     } else if (error.message.includes('403')) {
       errorStatusCode = 403;
     } else if (error.message.includes('404')) {
@@ -321,10 +351,11 @@ async function handleScrapeCommand(message) {
       errorStatusCode = 500;
     }
 
-    send({
+    sendToNativeHost({
       type: 'RESULT',
       taskId,
       url,
+      final_url: finalUrl,
       success: false,
       error: error.message,
       status_code: errorStatusCode,
@@ -332,7 +363,6 @@ async function handleScrapeCommand(message) {
     });
 
   } finally {
-    // Close the tab
     if (tab) {
       try {
         await chrome.tabs.remove(tab.id);
@@ -344,8 +374,8 @@ async function handleScrapeCommand(message) {
     isProcessing = false;
     broadcastStatus();
 
-    // Notify server we're ready again
-    send({
+    // Notify native host we're ready again
+    sendToNativeHost({
       type: 'STATUS',
       status: 'ready',
       timestamp: new Date().toISOString(),
@@ -353,41 +383,6 @@ async function handleScrapeCommand(message) {
   }
 }
 
-function waitForTabLoad(tabId, timeout) {
-  return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error('Page load timeout'));
-    }, timeout);
-
-    const listener = (updatedTabId, changeInfo) => {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') {
-        clearTimeout(timeoutId);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    };
-
-    chrome.tabs.onUpdated.addListener(listener);
-
-    // Check if already loaded
-    chrome.tabs.get(tabId, (tab) => {
-      if (chrome.runtime.lastError) {
-        clearTimeout(timeoutId);
-        chrome.tabs.onUpdated.removeListener(listener);
-        reject(new Error('Tab not found'));
-        return;
-      }
-      if (tab && tab.status === 'complete') {
-        clearTimeout(timeoutId);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    });
-  });
-}
-
-// Enhanced version that captures HTTP status code
 function waitForTabLoadWithStatus(tabId, targetUrl, timeout) {
   return new Promise((resolve, reject) => {
     let statusCode = 200;
@@ -406,10 +401,8 @@ function waitForTabLoadWithStatus(tabId, targetUrl, timeout) {
       }
     };
 
-    // Listen for HTTP response headers to capture status code
     if (chrome.webRequest) {
       webRequestListener = (details) => {
-        // Match the main frame request for our tab
         if (details.tabId === tabId && details.type === 'main_frame') {
           statusCode = details.statusCode;
           console.log('[Scraper] Captured status code:', statusCode, 'for URL:', details.url);
@@ -432,7 +425,6 @@ function waitForTabLoadWithStatus(tabId, targetUrl, timeout) {
 
     chrome.tabs.onUpdated.addListener(tabListener);
 
-    // Check if already loaded
     chrome.tabs.get(tabId, (tab) => {
       if (chrome.runtime.lastError) {
         cleanup();
@@ -485,6 +477,7 @@ async function buildDebugPayload() {
     type: 'RESULT',
     taskId: 'debug_snapshot',
     url: activeTab.url,
+    final_url: activeTab.url,
     success: true,
     html: content.html,
     title: content.title,

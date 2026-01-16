@@ -1,0 +1,16 @@
+{
+  "name": "scraper-native-host",
+  "version": "1.0.0",
+  "description": "Native messaging host for Scraping Controller extension",
+  "main": "index.js",
+  "bin": {
+    "scraper-native-host": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.8.0",
+    "hono": "^4.0.0"
+  }
+}
