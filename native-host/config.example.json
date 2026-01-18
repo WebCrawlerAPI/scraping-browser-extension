@@ -1,0 +1,4 @@
+{
+  "authToken": "your-secret-token-here",
+  "port": 3002
+}

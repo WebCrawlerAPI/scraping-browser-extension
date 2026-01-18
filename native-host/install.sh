@@ -86,10 +86,12 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS
     CHROME_MANIFEST_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
     CHROMIUM_MANIFEST_DIR="$HOME/Library/Application Support/Chromium/NativeMessagingHosts"
+    BRAVE_MANIFEST_DIR="$HOME/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     # Linux
     CHROME_MANIFEST_DIR="$HOME/.config/google-chrome/NativeMessagingHosts"
     CHROMIUM_MANIFEST_DIR="$HOME/.config/chromium/NativeMessagingHosts"
+    BRAVE_MANIFEST_DIR="$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
 else
     echo -e "${RED}Unsupported OS: $OSTYPE${NC}"
     exit 1
@@ -107,6 +109,13 @@ if [ -d "$(dirname "$CHROMIUM_MANIFEST_DIR")" ]; then
     mkdir -p "$CHROMIUM_MANIFEST_DIR"
     echo "$MANIFEST_CONTENT" > "$CHROMIUM_MANIFEST_DIR/$HOST_NAME.json"
     echo -e "${GREEN}Installed for Chromium: $CHROMIUM_MANIFEST_DIR/$HOST_NAME.json${NC}"
+fi
+
+# Install for Brave
+if [ -d "$(dirname "$BRAVE_MANIFEST_DIR")" ] || [[ "$OSTYPE" == "darwin"* ]]; then
+    mkdir -p "$BRAVE_MANIFEST_DIR"
+    echo "$MANIFEST_CONTENT" > "$BRAVE_MANIFEST_DIR/$HOST_NAME.json"
+    echo -e "${GREEN}Installed for Brave: $BRAVE_MANIFEST_DIR/$HOST_NAME.json${NC}"
 fi
 
 echo

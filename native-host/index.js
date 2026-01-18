@@ -3,6 +3,7 @@
 const { serve } = require('@hono/node-server');
 const { Hono } = require('hono');
 const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 
 // Log to file for debugging
@@ -16,10 +17,22 @@ function log(message) {
 
 log('Native host starting...');
 
+// Load config from config.json
+const configPath = path.join(__dirname, 'config.json');
+let config = {};
+if (fs.existsSync(configPath)) {
+  try {
+    config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    log('Loaded config from config.json');
+  } catch (e) {
+    log(`Failed to parse config.json: ${e.message}`);
+  }
+}
+
 // Configuration
-const PORT = parseInt(process.env.SCRAPER_PORT || '3002', 10);
+const PORT = parseInt(process.env.SCRAPER_PORT || config.port || '3002', 10);
 const DEFAULT_TIMEOUT = 60000;
-const AUTH_TOKEN = process.env.SCRAPER_AUTH_TOKEN || '';
+const AUTH_TOKEN = process.env.SCRAPER_AUTH_TOKEN || config.authToken || '';
 
 if (!AUTH_TOKEN) {
   log('WARNING: SCRAPER_AUTH_TOKEN not set - API will be unprotected!');
