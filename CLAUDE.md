@@ -84,6 +84,7 @@ Scrape a URL and return the HTML content.
 ```bash
 curl -X POST http://localhost:3002/scrape \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -d '{"url": "https://example.com"}'
 ```
 
@@ -91,6 +92,7 @@ curl -X POST http://localhost:3002/scrape \
 ```bash
 curl -X POST http://localhost:3002/scrape \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -d '{
     "url": "https://example.com",
     "options": {
@@ -126,7 +128,7 @@ Check if the native host is running.
 
 **Request:**
 ```bash
-curl http://localhost:3002/health
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:3002/health
 ```
 
 **Response:**
@@ -145,6 +147,7 @@ curl http://localhost:3002/health
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `SCRAPER_PORT` | `3002` | HTTP server port (environment variable) |
+| `SCRAPER_AUTH_TOKEN` | (none) | Bearer token for API authentication. If not set, API is unprotected |
 
 ### Extension (chrome.storage.local)
 
@@ -171,11 +174,12 @@ tail -f /tmp/scraper-native-host.log
 **Test the API:**
 ```bash
 # Health check
-curl http://localhost:3002/health
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:3002/health
 
 # Scrape a page
 curl -X POST http://localhost:3002/scrape \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -d '{"url": "https://example.com"}'
 ```
 
@@ -194,21 +198,28 @@ cd native-host
 # Simple scrape
 curl -X POST http://localhost:3002/scrape \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -d '{"url": "https://example.com"}'
 
 # With wait time for JavaScript-heavy pages
 curl -X POST http://localhost:3002/scrape \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -d '{"url": "https://spa-app.com", "options": {"waitFor": 3000}}'
 ```
 
 ### Node.js client example
 
 ```javascript
+const AUTH_TOKEN = process.env.SCRAPER_AUTH_TOKEN;
+
 async function scrape(url, options = {}) {
   const response = await fetch('http://localhost:3002/scrape', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${AUTH_TOKEN}`,
+    },
     body: JSON.stringify({ url, options }),
   });
 
@@ -231,7 +242,10 @@ console.log('Status:', result.status_code);
 ### Python client example
 
 ```python
+import os
 import requests
+
+AUTH_TOKEN = os.environ.get('SCRAPER_AUTH_TOKEN')
 
 def scrape(url, wait_for=None, timeout=None):
     options = {}
@@ -242,6 +256,7 @@ def scrape(url, wait_for=None, timeout=None):
 
     response = requests.post(
         'http://localhost:3002/scrape',
+        headers={'Authorization': f'Bearer {AUTH_TOKEN}'},
         json={'url': url, 'options': options}
     )
 

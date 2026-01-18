@@ -19,6 +19,11 @@ log('Native host starting...');
 // Configuration
 const PORT = parseInt(process.env.SCRAPER_PORT || '3002', 10);
 const DEFAULT_TIMEOUT = 60000;
+const AUTH_TOKEN = process.env.SCRAPER_AUTH_TOKEN || '';
+
+if (!AUTH_TOKEN) {
+  log('WARNING: SCRAPER_AUTH_TOKEN not set - API will be unprotected!');
+}
 
 // Pending requests: Map<taskId, {resolve, reject, timer}>
 const pendingRequests = new Map();
@@ -143,6 +148,32 @@ function handleExtensionMessage(message) {
 
 // Create Hono app
 const app = new Hono();
+
+// Bearer token authentication middleware
+app.use('*', async (c, next) => {
+  // Skip auth if no token is configured
+  if (!AUTH_TOKEN) {
+    return next();
+  }
+
+  const authHeader = c.req.header('Authorization');
+
+  if (!authHeader) {
+    return c.json({ error: 'Authorization header required' }, 401);
+  }
+
+  if (!authHeader.startsWith('Bearer ')) {
+    return c.json({ error: 'Invalid authorization format. Use: Bearer <token>' }, 401);
+  }
+
+  const token = authHeader.slice(7); // Remove 'Bearer ' prefix
+
+  if (token !== AUTH_TOKEN) {
+    return c.json({ error: 'Invalid token' }, 401);
+  }
+
+  return next();
+});
 
 // Health endpoint
 app.get('/health', (c) => {

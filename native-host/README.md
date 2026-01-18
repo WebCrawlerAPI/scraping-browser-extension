@@ -78,6 +78,7 @@ This will:
 ```bash
 curl -X POST http://localhost:3002/scrape \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -d '{"url": "https://example.com"}'
 ```
 
@@ -94,7 +95,7 @@ curl -X POST http://localhost:3002/scrape \
 ### GET /health
 
 ```bash
-curl http://localhost:3002/health
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:3002/health
 ```
 
 **Response:**
@@ -111,6 +112,7 @@ curl http://localhost:3002/health
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCRAPER_PORT` | `3002` | HTTP server port |
+| `SCRAPER_AUTH_TOKEN` | (none) | Bearer token for API authentication. If not set, API is unprotected |
 
 ## Debugging
 
