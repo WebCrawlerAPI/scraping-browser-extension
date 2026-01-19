@@ -526,14 +526,13 @@ async function handleScrapeCommand(message) {
     });
 
   } finally {
-    // DEBUG: commented out tab closing to inspect page console
-    // if (tab) {
-    //   try {
-    //     await chrome.tabs.remove(tab.id);
-    //   } catch (e) {
-    //     // Tab might already be closed
-    //   }
-    // }
+    if (tab) {
+      try {
+        await chrome.tabs.remove(tab.id);
+      } catch (e) {
+        // Tab might already be closed
+      }
+    }
 
     isProcessing = false;
     broadcastStatus();
