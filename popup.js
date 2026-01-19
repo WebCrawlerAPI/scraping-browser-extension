@@ -97,12 +97,16 @@ debugBtn.addEventListener('click', () => {
     debugBtn.disabled = false;
 
     if (chrome.runtime.lastError) {
-      setDebugStatus(`Failed: ${chrome.runtime.lastError.message}`, true);
+      const message = chrome.runtime.lastError.message || 'Unknown runtime error';
+      console.warn('[Scraper][popup] runtime error:', message);
+      setDebugStatus(`Failed: ${message}`, true);
       return;
     }
 
     if (!response?.success || !response.payload) {
-      setDebugStatus(response?.error || 'No payload captured', true);
+      const message = response?.error || 'No payload captured';
+      console.warn('[Scraper][popup] debug error:', message, response);
+      setDebugStatus(`Failed: ${message}`, true);
       return;
     }
 

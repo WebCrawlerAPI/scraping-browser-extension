@@ -5,6 +5,10 @@ const { Hono } = require('hono');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
+const { promisify } = require('util');
+
+const gunzipAsync = promisify(zlib.gunzip);
 
 // Log to file for debugging
 const LOG_FILE = '/tmp/scraper-native-host.log';
@@ -42,6 +46,11 @@ if (!AUTH_TOKEN) {
 const pendingRequests = new Map();
 
 // Native messaging protocol helpers
+const MAX_MESSAGE_BYTES = 1024 * 1024;
+const OVERSIZE_LOG_WINDOW_MS = 5000;
+let oversizeLogCount = 0;
+let lastOversizeLogAt = 0;
+
 function readMessage() {
   return new Promise((resolve, reject) => {
     // Read 4-byte length header
@@ -64,12 +73,36 @@ function readMessage() {
       }
 
       const messageLength = lengthBuffer.readUInt32LE(0);
-      if (messageLength > 1024 * 1024) {
-        reject(new Error('Message too large'));
+      if (messageLength > MAX_MESSAGE_BYTES) {
+        discardBody(messageLength)
+          .then(() => reject(new Error('Message too large')))
+          .catch(reject);
         return;
       }
 
       readBody(messageLength);
+    };
+
+    const discardBody = (length) => {
+      return new Promise((discardResolve, discardReject) => {
+        let remaining = length;
+        const discardChunk = () => {
+          const chunk = process.stdin.read(Math.min(remaining, 64 * 1024));
+          if (chunk === null) {
+            process.stdin.once('readable', discardChunk);
+            return;
+          }
+
+          remaining -= chunk.length;
+          if (remaining > 0) {
+            process.stdin.once('readable', discardChunk);
+            return;
+          }
+          discardResolve();
+        };
+
+        discardChunk();
+      });
     };
 
     const readBody = (length) => {
@@ -122,7 +155,22 @@ function generateTaskId() {
   return `task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 }
 
-function handleExtensionMessage(message) {
+// Decompress base64+gzip encoded HTML
+async function decompressHtml(compressedBase64) {
+  try {
+    // Decode base64 to buffer
+    const compressedBuffer = Buffer.from(compressedBase64, 'base64');
+    // Decompress gzip
+    const decompressedBuffer = await gunzipAsync(compressedBuffer);
+    // Convert to string
+    return decompressedBuffer.toString('utf8');
+  } catch (error) {
+    log(`Decompression error: ${error.message}`);
+    throw error;
+  }
+}
+
+async function handleExtensionMessage(message) {
   log(`Received from extension: ${message.type}`);
 
   if (message.type === 'RESULT') {
@@ -134,10 +182,29 @@ function handleExtensionMessage(message) {
       pendingRequests.delete(taskId);
 
       if (message.success) {
+        let html = message.html;
+
+        // Handle compressed HTML
+        if (message.html_compressed && message.compression === 'gzip+base64') {
+          try {
+            html = await decompressHtml(message.html_compressed);
+            log(`Decompressed HTML: ${message.original_html_bytes} bytes -> ${html.length} chars`);
+          } catch (error) {
+            log(`Failed to decompress HTML: ${error.message}`);
+            pending.resolve({
+              error: `Decompression failed: ${error.message}`,
+              status_code: 0,
+              content_size: 0,
+              final_url: message.final_url || message.url,
+            });
+            return;
+          }
+        }
+
         pending.resolve({
-          html: message.html,
+          html: html,
           status_code: message.status_code,
-          content_size: message.html ? message.html.length : 0,
+          content_size: html ? html.length : 0,
           final_url: message.final_url || message.url,
         });
       } else {
@@ -283,7 +350,13 @@ async function main() {
       handleExtensionMessage(message);
     } catch (error) {
       if (error.message === 'Message too large') {
-        log(`Error: ${error.message}`);
+        oversizeLogCount += 1;
+        const now = Date.now();
+        if (now - lastOversizeLogAt > OVERSIZE_LOG_WINDOW_MS) {
+          log(`Error: ${error.message} (count=${oversizeLogCount})`);
+          lastOversizeLogAt = now;
+          oversizeLogCount = 0;
+        }
         continue;
       }
       // EOF or other error

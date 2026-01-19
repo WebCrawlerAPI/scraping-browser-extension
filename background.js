@@ -216,12 +216,152 @@ function disconnectFromNativeHost() {
   console.log('[Scraper] Disconnected from native host');
 }
 
-function sendToNativeHost(data) {
+async function sendToNativeHost(data) {
   if (nativePort) {
-    nativePort.postMessage(data);
+    const payload = await sanitizeNativeMessage(data);
+    if (!payload) {
+      return false;
+    }
+    nativePort.postMessage(payload);
     return true;
   }
   return false;
+}
+
+const MAX_NATIVE_MESSAGE_BYTES = 900 * 1024;
+const HTML_TRUNCATION_SUFFIX = '\n<!-- truncated -->';
+
+function utf8ByteLength(value) {
+  return new TextEncoder().encode(value).length;
+}
+
+function truncateStringByBytes(value, maxBytes) {
+  if (maxBytes <= 0) {
+    return '';
+  }
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(value);
+  if (bytes.length <= maxBytes) {
+    return value;
+  }
+  const decoder = new TextDecoder('utf-8');
+  return decoder.decode(bytes.slice(0, maxBytes));
+}
+
+// Compress string using gzip and return base64 encoded result
+async function compressToBase64(str) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(str);
+
+  const cs = new CompressionStream('gzip');
+  const writer = cs.writable.getWriter();
+  writer.write(data);
+  writer.close();
+
+  const compressedChunks = [];
+  const reader = cs.readable.getReader();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    compressedChunks.push(value);
+  }
+
+  // Combine chunks
+  const totalLength = compressedChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const compressed = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of compressedChunks) {
+    compressed.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  // Convert to base64
+  let binary = '';
+  for (let i = 0; i < compressed.length; i++) {
+    binary += String.fromCharCode(compressed[i]);
+  }
+  return btoa(binary);
+}
+
+async function sanitizeNativeMessage(message) {
+  const raw = JSON.stringify(message);
+  if (utf8ByteLength(raw) <= MAX_NATIVE_MESSAGE_BYTES) {
+    return message;
+  }
+
+  if (typeof message.html !== 'string') {
+    console.warn('[Scraper] Message too large and no html to truncate.');
+    return {
+      ...message,
+      error: 'Message too large',
+      success: false,
+    };
+  }
+
+  // Try compression first
+  const originalHtmlBytes = utf8ByteLength(message.html);
+  console.log('[Scraper] HTML too large, attempting compression...', {
+    originalHtmlBytes,
+    maxBytes: MAX_NATIVE_MESSAGE_BYTES,
+  });
+
+  try {
+    const compressedBase64 = await compressToBase64(message.html);
+    const compressedMessage = {
+      ...message,
+      html: undefined,
+      html_compressed: compressedBase64,
+      compression: 'gzip+base64',
+      original_html_bytes: originalHtmlBytes,
+    };
+    delete compressedMessage.html;
+
+    const compressedSize = utf8ByteLength(JSON.stringify(compressedMessage));
+    console.log('[Scraper] Compression result:', {
+      originalHtmlBytes,
+      compressedSize,
+      compressionRatio: (compressedSize / originalHtmlBytes * 100).toFixed(1) + '%',
+    });
+
+    if (compressedSize <= MAX_NATIVE_MESSAGE_BYTES) {
+      return compressedMessage;
+    }
+
+    console.warn('[Scraper] Even compressed message is too large, falling back to truncation');
+  } catch (compressionError) {
+    console.warn('[Scraper] Compression failed, falling back to truncation:', compressionError.message);
+  }
+
+  // Fallback to truncation
+  const base = {
+    ...message,
+    html: '',
+    truncated: true,
+    original_html_bytes: originalHtmlBytes,
+  };
+  const baseBytes = utf8ByteLength(JSON.stringify(base));
+  const remainingBytes = MAX_NATIVE_MESSAGE_BYTES - baseBytes;
+  if (remainingBytes <= 0) {
+    console.warn('[Scraper] Message too large even after dropping html.');
+    return base;
+  }
+
+  const suffixBytes = utf8ByteLength(HTML_TRUNCATION_SUFFIX);
+  const htmlBudget = Math.max(0, remainingBytes - suffixBytes);
+  const truncatedHtml = `${truncateStringByBytes(message.html, htmlBudget)}${HTML_TRUNCATION_SUFFIX}`;
+  console.warn('[Scraper] Truncated html to fit native message size.', {
+    originalHtmlBytes,
+    truncatedHtmlBytes: utf8ByteLength(truncatedHtml),
+    maxBytes: MAX_NATIVE_MESSAGE_BYTES,
+  });
+
+  return {
+    ...message,
+    html: truncatedHtml,
+    truncated: true,
+    original_html_bytes: originalHtmlBytes,
+  };
 }
 
 function handleNativeMessage(message) {
@@ -248,7 +388,7 @@ async function handleScrapeCommand(message) {
   const { taskId, url, options = {} } = message;
 
   if (!url) {
-    sendToNativeHost({
+    await sendToNativeHost({
       type: 'RESULT',
       taskId,
       success: false,
@@ -261,7 +401,7 @@ async function handleScrapeCommand(message) {
   }
 
   if (isProcessing) {
-    sendToNativeHost({
+    await sendToNativeHost({
       type: 'RESULT',
       taskId,
       success: false,
@@ -277,7 +417,7 @@ async function handleScrapeCommand(message) {
   broadcastStatus();
 
   // Notify native host we're starting
-  sendToNativeHost({
+  await sendToNativeHost({
     type: 'STATUS',
     status: 'processing',
     taskId,
@@ -295,6 +435,11 @@ async function handleScrapeCommand(message) {
       active: false,
     });
 
+    await chrome.tabs.update(tab.id, { active: true });
+    if (tab.windowId !== undefined) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+
     // Wait for page to load
     const timeout = options.timeout || config.pageLoadTimeout;
     const loadResult = await waitForTabLoadWithStatus(tab.id, url, timeout);
@@ -311,15 +456,33 @@ async function handleScrapeCommand(message) {
     const tabInfo = await chrome.tabs.get(tab.id);
     finalUrl = tabInfo.url || url;
 
+    await chrome.tabs.update(tab.id, { active: true });
+    await sleep(250);
+
     // Extract content
-    const content = await getPageContent(tab.id);
+    const content = await getPageContent(tab.id, {
+      rootSelector: null,
+      includeDocument: true,
+      waitForShadowRoots: true,
+      shadowRootTimeout: options.shadowRootTimeout || 5000,
+      waitForSelector: options.waitForSelector,
+      waitForSelectorTimeout: options.waitForSelectorTimeout || 10000,
+      waitForSelectorPollInterval: options.waitForSelectorPollInterval || 250,
+    });
+
+    if (!content?.html) {
+      console.warn('[Scraper] Empty HTML extracted for', finalUrl);
+    } else {
+      const shadowTemplates = (content.html.match(/shadowroot=/g) || []).length;
+      console.log('[Scraper] HTML length:', content.html.length, 'shadow templates:', shadowTemplates);
+    }
 
     if (!content) {
       throw new Error('Failed to extract page content');
     }
 
     // Send result
-    sendToNativeHost({
+    await sendToNativeHost({
       type: 'RESULT',
       taskId,
       url,
@@ -351,7 +514,7 @@ async function handleScrapeCommand(message) {
       errorStatusCode = 500;
     }
 
-    sendToNativeHost({
+    await sendToNativeHost({
       type: 'RESULT',
       taskId,
       url,
@@ -363,19 +526,20 @@ async function handleScrapeCommand(message) {
     });
 
   } finally {
-    if (tab) {
-      try {
-        await chrome.tabs.remove(tab.id);
-      } catch (e) {
-        // Tab might already be closed
-      }
-    }
+    // DEBUG: commented out tab closing to inspect page console
+    // if (tab) {
+    //   try {
+    //     await chrome.tabs.remove(tab.id);
+    //   } catch (e) {
+    //     // Tab might already be closed
+    //   }
+    // }
 
     isProcessing = false;
     broadcastStatus();
 
     // Notify native host we're ready again
-    sendToNativeHost({
+    await sendToNativeHost({
       type: 'STATUS',
       status: 'ready',
       timestamp: new Date().toISOString(),
@@ -443,20 +607,98 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function getPageContent(tabId) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: extractPageContent,
+async function getPageContent(tabId, options = {}) {
+  console.log('[Scraper] getPageContent start', {
+    tabId,
+    hasWaitForSelector: Boolean(options.waitForSelector),
+    hasWaitForShadowRoots: Boolean(options.waitForShadowRoots),
   });
+  
+  if (options.waitForSelector) {
+    const timeout = options.waitForSelectorTimeout || 10000;
+    const pollInterval = options.waitForSelectorPollInterval || 250;
+    const startedAt = Date.now();
+    let selectorFound = false;
 
-  const content = results[0]?.result || null;
+    while (Date.now() - startedAt < timeout) {
+      const [{ result: selectorInfo } = {}] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: checkSelectorPresence,
+        args: [options.waitForSelector],
+      });
 
-  if (content?.visited) {
-    console.log('[Scraper][serialize] visited count:', content.visited.length);
-    console.log('[Scraper][serialize] nodes:', content.visited);
-    delete content.visited;
+      if (selectorInfo?.found) {
+        console.log('[Scraper][selector] found after', Date.now() - startedAt, 'ms', 'selector:', options.waitForSelector);
+        selectorFound = true;
+        break;
+      }
+
+      await sleep(pollInterval);
+    }
+
+    if (!selectorFound) {
+      console.log('[Scraper][selector] not found after', Date.now() - startedAt, 'ms', 'selector:', options.waitForSelector);
+    }
   }
 
+  if (options.waitForShadowRoots) {
+    const timeout = options.shadowRootTimeout || 5000;
+    const pollInterval = options.shadowRootPollInterval || 250;
+    const startedAt = Date.now();
+    let shadowFound = false;
+
+    while (Date.now() - startedAt < timeout) {
+      const [{ result: shadowInfo } = {}] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: checkShadowRoots,
+        world: 'MAIN',
+      });
+
+      console.log('[Scraper][shadow] check result:', shadowInfo);
+      if (shadowInfo?.count > 0) {
+        console.log('[Scraper][shadow] ready after', Date.now() - startedAt, 'ms', 'hosts:', shadowInfo.hosts);
+        shadowFound = true;
+        break;
+      }
+
+      await sleep(pollInterval);
+    }
+
+    if (!shadowFound) {
+      console.log('[Scraper][shadow] none detected after', Date.now() - startedAt, 'ms');
+    }
+  }
+
+  const pageOptions = {
+    rootSelector: options.rootSelector,
+    includeDocument: options.includeDocument,
+  };
+
+  let results = [];
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: extractPageContent,
+      args: [pageOptions],
+      world: 'MAIN',
+    });
+  } catch (error) {
+    console.warn('[Scraper] executeScript failed:', error?.message || error);
+    throw new Error(error?.message || 'Failed to inject content script');
+  }
+
+  console.log('[Scraper] executeScript results:', JSON.stringify(results, null, 2));
+
+  const content = results[0]?.result || null;
+  if (!content) {
+    console.warn('[Scraper] getPageContent returned null - script likely threw an error');
+  } else if (!content.html) {
+    console.warn('[Scraper] getPageContent empty result', {
+      tabId,
+      error: content?.error || null,
+      keys: Object.keys(content),
+    });
+  }
   return content;
 }
 
@@ -464,13 +706,25 @@ async function buildDebugPayload() {
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
   if (!activeTab?.id) {
+    console.warn('[Scraper][debug] no active tab');
     throw new Error('No active tab available');
   }
+  console.log('[Scraper][debug] capturing active tab', {
+    tabId: activeTab.id,
+    url: activeTab.url,
+  });
 
-  const content = await getPageContent(activeTab.id);
+  const content = await getPageContent(activeTab.id, {
+    rootSelector: null,
+    includeDocument: true,
+  });
 
-  if (!content) {
-    throw new Error('Failed to capture page content');
+  if (!content?.html) {
+    console.warn('[Scraper][debug] empty content', {
+      tabId: activeTab.id,
+      error: content?.error || null,
+    });
+    throw new Error(content?.error || 'Failed to capture page content');
   }
 
   return {
@@ -487,72 +741,289 @@ async function buildDebugPayload() {
 }
 
 // Runs in page context
-function extractPageContent() {
-  const voidElements = new Set([
-    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
-    'param', 'source', 'track', 'wbr', 'basefont', 'bgsound', 'frame', 'keygen',
-  ]);
+function extractPageContent({
+  rootSelector,
+  includeDocument = false,
+} = {}) {
+  const startTime = performance.now();
+  try {
+    console.log('[extractPageContent] start', { rootSelector, includeDocument });
+    console.log('[extractPageContent] chrome.dom available:', typeof chrome !== 'undefined' && typeof chrome.dom !== 'undefined');
+    console.log('[extractPageContent] chrome.dom.openOrClosedShadowRoot available:', typeof chrome !== 'undefined' && typeof chrome.dom?.openOrClosedShadowRoot === 'function');
+    console.log('[extractPageContent] document.body.getHTML available:', typeof document.body.getHTML === 'function');
 
-  const visited = [];
+    function allShadowRoots(root) {
+      const elements = [...root.querySelectorAll('*')].filter((el) => el instanceof HTMLElement);
+      console.log('[allShadowRoots] elements count:', elements.length);
 
-  const escapeText = (text) => text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+      const roots = elements
+        .map((el) => {
+          if (typeof chrome !== 'undefined' && typeof chrome.dom?.openOrClosedShadowRoot === 'function') {
+            try {
+              return chrome.dom.openOrClosedShadowRoot(el);
+            } catch (e) {
+              return el.shadowRoot;
+            }
+          }
+          return el.shadowRoot;
+        })
+        .filter((o) => o);
 
-  const escapeAttribute = (value) => value
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;');
-
-  const serializeNode = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      return escapeText(node.textContent || '');
+      console.log('[allShadowRoots] shadow roots found:', roots.length);
+      return [...roots, ...roots.flatMap(allShadowRoots)];
     }
 
-    if (node.nodeType === Node.COMMENT_NODE) {
-      return `<!--${node.nodeValue || ''}-->`;
-    }
-
-    if (node.nodeType !== Node.ELEMENT_NODE) {
-      return '';
-    }
-
-    const tagName = node.tagName.toLowerCase();
-    const debugLabel = [tagName, node.id ? `#${node.id}` : '', node.className ? `.${String(node.className).trim().replace(/\s+/g, '.')}` : '']
-      .join('')
-      .replace(/\.+$/, '');
-    visited.push(debugLabel || tagName);
-    const attributes = Array.from(node.attributes)
-      .map((attr) => `${attr.name}="${escapeAttribute(attr.value)}"`)
-      .join(' ');
-
-    let html = `<${tagName}${attributes ? ' ' + attributes : ''}>`;
-
-    if (!voidElements.has(tagName)) {
-      node.childNodes.forEach((child) => {
-        html += serializeNode(child);
-      });
-
-      if (node.shadowRoot) {
-        html += `<template shadowroot="${node.shadowRoot.mode}">`;
-        node.shadowRoot.childNodes.forEach((child) => {
-          html += serializeNode(child);
-        });
-        html += '</template>';
+    // If a specific selector is requested, extract just that element
+    if (rootSelector) {
+      const root = document.querySelector(rootSelector);
+      console.log('[extractPageContent] rootSelector result:', root ? root.tagName : 'null');
+      if (!root) {
+        return {
+          html: '',
+          title: document.title,
+          durationMs: Math.round(performance.now() - startTime),
+        };
       }
 
-      html += `</${tagName}>`;
+      const shadowRoots = allShadowRoots(root);
+      const attributes = Array.from(root.attributes)
+        .map((attr) => `${attr.name}="${attr.value}"`)
+        .join(' ');
+      const tagName = root.tagName.toLowerCase();
+      const innerHTML = typeof root.getHTML === 'function'
+        ? root.getHTML({ shadowRoots })
+        : root.innerHTML;
+
+      console.log('[extractPageContent] rootSelector innerHTML length:', innerHTML.length);
+
+      return {
+        html: `<${tagName}${attributes ? ' ' + attributes : ''}>${innerHTML}</${tagName}>`,
+        title: document.title,
+        durationMs: Math.round(performance.now() - startTime),
+      };
     }
 
-    return html;
-  };
+    // Build full document content
+    let content = '';
+    console.log('[extractPageContent] document.childNodes count:', document.childNodes.length);
 
-  const root = document.querySelector('main') || document.body || document.documentElement;
+    for (const node of document.childNodes) {
+      console.log('[extractPageContent] processing node:', node.nodeType, node.nodeName);
 
-  return {
-    html: serializeNode(root),
-    title: document.title,
-    visited,
-  };
+      switch (node) {
+        case document.documentElement:
+          console.log('[extractPageContent] matched documentElement, children count:', document.documentElement.children.length);
+          for (const child of document.documentElement.children) {
+            console.log('[extractPageContent] processing child:', child.tagName);
+            if (child === document.body) {
+              const bodyAttrs = Array.from(document.body.attributes)
+                .map((attr) => `${attr.name}="${attr.value}"`)
+                .join(' ');
+              console.log('[extractPageContent] body attributes:', bodyAttrs);
+
+              const shadowRoots = allShadowRoots(document.body);
+              console.log('[extractPageContent] body shadow roots:', shadowRoots.length);
+
+              let bodyContent;
+              if (typeof document.body.getHTML === 'function') {
+                bodyContent = document.body.getHTML({ shadowRoots });
+                console.log('[extractPageContent] used getHTML, length:', bodyContent.length);
+              } else {
+                bodyContent = document.body.innerHTML;
+                console.log('[extractPageContent] used innerHTML fallback, length:', bodyContent.length);
+              }
+
+              content +=
+                '<body ' +
+                bodyAttrs +
+                '>' +
+                bodyContent +
+                '</body>';
+            } else {
+              content += child.outerHTML;
+              console.log('[extractPageContent] added child outerHTML, content length now:', content.length);
+            }
+          }
+          break;
+        default:
+          const serialized = new XMLSerializer().serializeToString(node);
+          content += serialized;
+          console.log('[extractPageContent] serialized node:', serialized.substring(0, 100));
+          break;
+      }
+    }
+
+    console.log('[extractPageContent] content length before wrap:', content.length);
+
+    // Wrap in html tag if includeDocument is true
+    if (includeDocument && document.documentElement) {
+      const htmlAttributes = Array.from(document.documentElement.attributes)
+        .map((attr) => `${attr.name}="${attr.value}"`)
+        .join(' ');
+      content = `<html${htmlAttributes ? ' ' + htmlAttributes : ''}>${content}</html>`;
+
+      // Add doctype if present
+      if (document.doctype) {
+        const { name, publicId, systemId } = document.doctype;
+        const publicPart = publicId ? ` PUBLIC "${publicId}"` : '';
+        const systemPart = systemId ? ` "${systemId}"` : '';
+        content = `<!DOCTYPE ${name}${publicPart}${systemPart}>${content}`;
+      }
+    }
+
+    console.log('[extractPageContent] final content length:', content.length);
+
+    return {
+      html: content,
+      title: document.title,
+      durationMs: Math.round(performance.now() - startTime),
+    };
+  } catch (error) {
+    console.error('[extractPageContent] error:', error);
+    console.error('[extractPageContent] error stack:', error.stack);
+    return null;
+  }
+}
+
+function checkShadowRoots() {
+  try {
+    const chromeApi = globalThis.chrome;
+
+    // Diagnostic info
+    const diagnostics = {
+      chromeExists: typeof chrome !== 'undefined',
+      chromeDomExists: typeof chrome !== 'undefined' && typeof chrome.dom !== 'undefined',
+      openOrClosedExists: typeof chrome !== 'undefined' && typeof chrome.dom?.openOrClosedShadowRoot === 'function',
+      globalThisChromeExists: typeof globalThis.chrome !== 'undefined',
+      globalThisChromeDomExists: typeof globalThis.chrome?.dom !== 'undefined',
+    };
+
+    const getShadowRoot = (node) => {
+      if (!(node instanceof HTMLElement)) {
+        return null;
+      }
+      if (chromeApi?.dom?.openOrClosedShadowRoot) {
+        try {
+          return chromeApi.dom.openOrClosedShadowRoot(node) || null;
+        } catch (e) {
+          return node.shadowRoot || null;
+        }
+      }
+      return node.shadowRoot || null;
+    };
+
+    // Count elements with open shadowRoot (always accessible)
+    const allElements = Array.from(document.querySelectorAll('*'));
+    const openShadowCount = allElements.filter((el) => el.shadowRoot).length;
+
+    const hostCandidates = allElements.filter((node) => getShadowRoot(node));
+    const hosts = hostCandidates.slice(0, 5).map((node) => {
+      const tag = node.tagName ? node.tagName.toLowerCase() : 'unknown';
+      const id = node.id ? `#${node.id}` : '';
+      const className = node.className ? `.${String(node.className).trim().replace(/\s+/g, '.')}` : '';
+      return `${tag}${id}${className}`;
+    });
+
+    // Extra diagnostics
+    const bodyLength = document.body?.innerHTML?.length || 0;
+    const firstFewTags = allElements.slice(0, 10).map((el) => el.tagName.toLowerCase());
+    const customElements = allElements.filter((el) => el.tagName.includes('-')).map((el) => el.tagName.toLowerCase());
+    const uniqueCustomElements = [...new Set(customElements)];
+
+    // Debug c-wiz specifically
+    const cwizElements = Array.from(document.querySelectorAll('c-wiz'));
+    const cwizDebug = cwizElements.slice(0, 3).map((el) => {
+      let chromeDomResult = 'not called';
+      let chromeDomError = null;
+      if (chromeApi?.dom?.openOrClosedShadowRoot) {
+        try {
+          const result = chromeApi.dom.openOrClosedShadowRoot(el);
+          chromeDomResult = result ? 'ShadowRoot' : 'null';
+        } catch (e) {
+          chromeDomError = e.message;
+        }
+      }
+      return {
+        tagName: el.tagName,
+        shadowRoot: el.shadowRoot ? 'exists' : 'null',
+        chromeDomResult,
+        chromeDomError,
+        hasChildNodes: el.childNodes.length,
+        innerHTML: el.innerHTML.substring(0, 100),
+      };
+    });
+
+    // Compare getHTML vs innerHTML
+    const getHTMLLength = typeof document.body.getHTML === 'function'
+      ? document.body.getHTML({ shadowRoots: [] }).length
+      : 'N/A';
+    const innerHTMLLength = document.body.innerHTML.length;
+
+    // Check for the specific table content
+    const targetTable = document.querySelector('table tbody tr td div');
+    const tableContent = targetTable ? targetTable.textContent.substring(0, 100) : 'not found';
+    const allTbodies = document.querySelectorAll('tbody').length;
+    const allTables = document.querySelectorAll('table').length;
+
+    // Deep dive into table structure
+    const tbody2 = document.querySelectorAll('tbody')[1];
+    const tbody2Debug = tbody2 ? {
+      childCount: tbody2.children.length,
+      innerHTML: tbody2.innerHTML.substring(0, 200),
+      firstRowHTML: tbody2.querySelector('tr')?.innerHTML?.substring(0, 200) || 'no tr',
+    } : 'tbody[1] not found';
+
+    // Check all table cells
+    const allTds = document.querySelectorAll('table td');
+    const tdsWithText = Array.from(allTds).filter(td => td.textContent.trim().length > 0);
+    const tdsSample = Array.from(allTds).slice(0, 5).map(td => ({
+      text: td.textContent.substring(0, 50),
+      html: td.innerHTML.substring(0, 100),
+      childCount: td.children.length,
+    }));
+
+    return {
+      count: hostCandidates.length,
+      openShadowCount,
+      hosts,
+      diagnostics,
+      totalElements: allElements.length,
+      bodyLength,
+      firstFewTags,
+      customElementsCount: customElements.length,
+      uniqueCustomElements: uniqueCustomElements.slice(0, 10),
+      documentReadyState: document.readyState,
+      url: window.location.href,
+      cwizCount: cwizElements.length,
+      cwizDebug,
+      getHTMLLength,
+      innerHTMLLength,
+      allTables,
+      allTbodies,
+      tableContent,
+      tbody2Debug,
+      totalTds: allTds.length,
+      tdsWithTextCount: tdsWithText.length,
+      tdsSample,
+    };
+  } catch (error) {
+    return {
+      error: error.message,
+      stack: error.stack,
+    };
+  }
+}
+
+function checkSelectorPresence(selector) {
+  try {
+    const node = document.querySelector(selector);
+    return {
+      found: Boolean(node),
+    };
+  } catch (error) {
+    return {
+      found: false,
+      error: error.message,
+    };
+  }
 }
